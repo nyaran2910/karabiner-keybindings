@@ -1,13 +1,13 @@
-import { Action, ActionPanel, Form, Icon, List, Toast, getPreferenceValues, showToast, useNavigation } from "@raycast/api";
+import { Action, ActionPanel, Alert, confirmAlert, Form, Icon, List, Toast, getPreferenceValues, showToast, useNavigation } from "@raycast/api";
 import { useEffect, useState } from "react";
-import { actionLabel, commitShortcut, configPath, keyLabel, keyOf, keys, keyTypes, loadConfig, modifiers, shortcut, outputPhases, type Output, type Outputs, type Snapshot } from "./config";
+import { addBinding, deleteBinding, actionLabel, commitShortcut, configPath, keyLabel, keyOf, keys, keyTypes, loadConfig, modifiers, shortcut, outputPhases, type Binding, type Output, type Outputs, type Snapshot } from "./config";
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 const actionTypes = [
-  { value: "key", title: "キー入力" },
-  { value: "shell", title: "シェルコマンド" },
-  { value: "app", title: "アプリを開く" },
+  { value: "key", title: "Send Keystroke" },
+  { value: "shell", title: "Shell Command" },
+  { value: "app", title: "Open Application" },
 ];
 
 function outputType(output: Output) {
@@ -26,20 +26,20 @@ function OutputFields({ id, output, complex, label }: { id: string; output: Outp
   return <>
     <Form.Separator />
     <Form.Description text={label} />
-    <Form.Dropdown id={id + "-type"} title="動作の種類" value={type} onChange={setType}>
+    <Form.Dropdown id={id + "-type"} title="Action Type" value={type} onChange={setType}>
       {actionTypes.filter(({ value }) => complex || value === "key").map(({ value, title }) =>
         <Form.Dropdown.Item key={value} value={value} title={title} />)}
     </Form.Dropdown>
-    {type === "shell" && <Form.TextArea id={id + "-command"} title="シェルコマンド"
+    {type === "shell" && <Form.TextArea id={id + "-command"} title="Shell Command"
       defaultValue={output.shell_command ?? ""} placeholder="/usr/bin/open -a Finder" />}
     {type === "app" && <>
-      <Form.TextField id={id + "-app-path"} title="アプリのパス" defaultValue={app?.file_path ?? ""}
+      <Form.TextField id={id + "-app-path"} title="Application Path" defaultValue={app?.file_path ?? ""}
         placeholder="/Applications/Example.app" />
-      <Form.TextField id={id + "-bundle"} title="バンドル ID" defaultValue={app?.bundle_identifier ?? ""}
-        placeholder="パスかバンドル ID を入力" />
+      <Form.TextField id={id + "-bundle"} title="Bundle ID" defaultValue={app?.bundle_identifier ?? ""}
+        placeholder="Enter a path or bundle ID" />
     </>}
     {type === "key" && <>
-      <Form.Dropdown id={id + "-key"} title="出力キー" defaultValue={key ? key.type + ":" + key.code : "key_code:a"}>
+      <Form.Dropdown id={id + "-key"} title="Output Key" defaultValue={key ? key.type + ":" + key.code : "key_code:a"}>
         {keyTypes.map((keyType) => {
           const codes = new Set(keys[keyType as keyof typeof keys]);
           if (key?.type === keyType) codes.add(key.code);
@@ -48,7 +48,7 @@ function OutputFields({ id, output, complex, label }: { id: string; output: Outp
           </Form.Dropdown.Section>;
         })}
       </Form.Dropdown>
-      {complex && <Form.TagPicker id={id + "-mods"} title="出力の修飾キー" defaultValue={output.modifiers ?? []}>
+      {complex && <Form.TagPicker id={id + "-mods"} title="Output Modifiers" defaultValue={output.modifiers ?? []}>
         {[...new Set([...modifiers, ...(output.modifiers ?? [])])].map((name) =>
           <Form.TagPicker.Item key={name} value={name} title={keyLabel(name)} />)}
       </Form.TagPicker>}
@@ -56,7 +56,7 @@ function OutputFields({ id, output, complex, label }: { id: string; output: Outp
   </>;
 }
 
-type FormValues = { key: string; mandatory?: string[] } & Record<string, string | string[] | undefined>;
+type FormValues = { key: string; name?: string; mandatory?: string[] } & Record<string, string | string[] | undefined>;
 
 function readOutput(values: FormValues, id: string, original: Output): Output {
   const kind = values[id + "-type"];
@@ -64,19 +64,19 @@ function readOutput(values: FormValues, id: string, original: Output): Output {
   const result: Output = kind === outputType(original) ? { ...original } : {};
   if (kind === "shell") {
     const command = String(values[id + "-command"] ?? "");
-    if (!command.trim()) throw new Error("シェルコマンドを入力してください。");
+    if (!command.trim()) throw new Error("Enter a shell command.");
     result.shell_command = command;
   } else if (kind === "app") {
     const filePath = String(values[id + "-app-path"] ?? "").trim();
     const bundle = String(values[id + "-bundle"] ?? "").trim();
-    if (!filePath && !bundle) throw new Error("アプリのパスかバンドル ID を入力してください。");
+    if (!filePath && !bundle) throw new Error("Enter an application path or bundle ID.");
     result.software_function = { ...result.software_function, open_application: {
       ...(filePath ? { file_path: filePath } : {}),
       ...(bundle ? { bundle_identifier: bundle } : {}),
     } };
   } else {
     const [type, code] = String(values[id + "-key"] ?? "").split(":");
-    if (!keyTypes.includes(type) || !code) throw new Error("出力キーを選んでください。");
+    if (!keyTypes.includes(type) || !code) throw new Error("Select an output key.");
     const previous = keyOf(result);
     if (previous) delete result[previous.type];
     result[type] = code;
@@ -87,9 +87,12 @@ function readOutput(values: FormValues, id: string, original: Output): Output {
   return result;
 }
 
-function Editor({ snapshot, index, reload }: { snapshot: Snapshot; index: number; reload: () => void }) {
+function Editor({ snapshot, index, profile, reload }: { snapshot: Snapshot; index?: number; profile: string; reload: () => void }) {
   const { pop } = useNavigation();
-  const binding = snapshot.bindings[index];
+  const adding = index === undefined;
+  const binding: Pick<Binding, "group" | "complex" | "mapping"> = adding
+    ? { group: "Add Keybinding", complex: true, mapping: { from: { key_code: "a" }, to: [{ key_code: "b" }] } }
+    : snapshot.bindings[index];
   const original = keyOf(binding.mapping.from);
   const [saving, setSaving] = useState(false);
   const options = keyTypes.flatMap((type) => {
@@ -110,29 +113,35 @@ function Editor({ snapshot, index, reload }: { snapshot: Snapshot; index: number
         const sequence = binding.mapping[phase];
         if (sequence) outputs[phase] = sequence.map((output, step) => readOutput(values, phase + step, output));
       }
-      commitShortcut(snapshot, index, selected.type, selected.code, values.mandatory ?? [], outputs);
+      if (adding) addBinding(snapshot, profile, values.name ?? "", selected.type, selected.code, values.mandatory ?? [], outputs);
+      else commitShortcut(snapshot, index, selected.type, selected.code, values.mandatory ?? [], outputs);
       reload();
       pop();
-      await showToast({ style: Toast.Style.Success, title: "キー割り当てを保存しました" });
+      await showToast({ style: Toast.Style.Success, title: "Keybinding Saved" });
     } catch (error) {
-      await showToast({ style: Toast.Style.Failure, title: "保存できませんでした", message: message(error) });
+      await showToast({ style: Toast.Style.Failure, title: "Could Not Save Keybinding", message: message(error) });
     } finally {
       setSaving(false);
     }
   }
 
   if (!original) return <Form navigationTitle={binding.group}>
-    <Form.Description title="動作" text={actionLabel(binding.mapping)} />
-    <Form.Description text="この形式の入力は編集できません。" />
+    <Form.Description title="Action" text={actionLabel(binding.mapping)} />
+    <Form.Description text="This input format cannot be edited." />
   </Form>;
 
   const mandatory = binding.mapping.from.modifiers?.mandatory ?? [];
   return <Form navigationTitle={binding.group} isLoading={saving} actions={
-    <ActionPanel><Action.SubmitForm title="キー割り当てを保存" onSubmit={submit} /></ActionPanel>
+    <ActionPanel><Action.SubmitForm title="Save Keybinding" onSubmit={submit} /></ActionPanel>
   }>
-    <Form.Description title="動作" text={actionLabel(binding.mapping)} />
-    <Form.Description title="現在の割り当て" text={shortcut(binding.mapping.from)} />
-    <Form.Dropdown id="key" title="入力キー" defaultValue={original.type + ":" + original.code}>
+    {adding ? <>
+      <Form.Description title="Profile" text={profile} />
+      <Form.TextField id="name" title="Name" placeholder="Open my workspace" autoFocus />
+    </> : <>
+      <Form.Description title="Action" text={actionLabel(binding.mapping)} />
+      <Form.Description title="Current Shortcut" text={shortcut(binding.mapping.from)} />
+    </>}
+    <Form.Dropdown id="key" title="Input Key" defaultValue={original.type + ":" + original.code}>
       {keyTypes.map((type) => {
         const items = options.filter((option) => option.type === type);
         return items.length > 0 && <Form.Dropdown.Section key={type} title={keyLabel(type)}>
@@ -140,14 +149,14 @@ function Editor({ snapshot, index, reload }: { snapshot: Snapshot; index: number
         </Form.Dropdown.Section>;
       })}
     </Form.Dropdown>
-    {binding.complex && <Form.TagPicker id="mandatory" title="必須の修飾キー" defaultValue={mandatory}>
+    {binding.complex && <Form.TagPicker id="mandatory" title="Required Modifiers" defaultValue={mandatory}>
       {[...new Set([...modifiers, ...mandatory])].map((name) =>
         <Form.TagPicker.Item key={name} value={name} title={keyLabel(name)} />)}
     </Form.TagPicker>}
     {outputPhases.flatMap((phase) => (binding.mapping[phase] ?? []).map((output, step) => {
       const id = phase + step;
-      const timing = phase === "to" ? "キーを押したとき" : "キーを離したとき";
-      return <OutputFields key={id} id={id} output={output} complex={binding.complex} label={timing + " · 動作 " + (step + 1)} />;
+      const timing = phase === "to" ? "On Key Press" : "On Key Release";
+      return <OutputFields key={id} id={id} output={output} complex={binding.complex} label={timing + " · Action " + (step + 1)} />;
     }))}
   </Form>;
 }
@@ -171,15 +180,35 @@ export default function Command() {
   }
   useEffect(reload, [path]);
 
+  async function remove(index: number) {
+    if (!snapshot) return;
+    const { mapping } = snapshot.bindings[index];
+    const confirmed = await confirmAlert({
+      title: "Delete Keybinding?",
+      message: shortcut(mapping.from) + " → " + actionLabel(mapping),
+      primaryAction: { title: "Delete Keybinding", style: Alert.ActionStyle.Destructive },
+    });
+    if (!confirmed) return;
+    try {
+      deleteBinding(snapshot, index);
+      reload();
+      await showToast({ style: Toast.Style.Success, title: "Keybinding Deleted" });
+    } catch (error) {
+      await showToast({ style: Toast.Style.Failure, title: "Could Not Delete Keybinding", message: message(error) });
+    }
+  }
+
+  const addAction = snapshot && profile && <Action.Push title="Add Keybinding" icon={Icon.Plus}
+    target={<Editor snapshot={snapshot} profile={profile} reload={reload} />} />;
   const visible = snapshot?.bindings.map((binding, index) => ({ ...binding, index }))
     .filter((binding) => binding.profile === profile) ?? [];
-  return <List searchBarPlaceholder="動作、キー、対象アプリを検索" searchBarAccessory={
-    snapshot && <List.Dropdown tooltip="プロファイル" value={profile} onChange={setProfile}>
+  return <List searchBarPlaceholder="Search actions, keys, and applications" searchBarAccessory={
+    snapshot && <List.Dropdown tooltip="Profile" value={profile} onChange={setProfile}>
       {snapshot.config.profiles?.map(({ name }) => <List.Dropdown.Item key={name} title={name} value={name} />)}
     </List.Dropdown>
   }>
-    <List.EmptyView title={error ? "Karabiner の設定を開けません" : "割り当てがありません"} description={error || path}
-      actions={<ActionPanel><Action title="再読み込み" onAction={reload} /></ActionPanel>} />
+    <List.EmptyView title={error ? "Could Not Open Karabiner Configuration" : "No Keybindings"} description={error || path}
+      actions={<ActionPanel>{addAction}<Action title="Reload" onAction={reload} /></ActionPanel>} />
     {snapshot && [...new Set(visible.map(({ group }) => group))].map((group) =>
       <List.Section key={group} title={group}>
         {visible.filter((binding) => binding.group === group).map(({ mapping, index }) => {
@@ -190,8 +219,10 @@ export default function Command() {
           return <List.Item key={index} icon={Icon.Keyboard} title={title} subtitle={apps.join(", ")}
             accessories={[{ tag: input }]} keywords={[group, input, ...apps]}
             actions={<ActionPanel>
-              <Action.Push title="割り当てを編集" target={<Editor snapshot={snapshot} index={index} reload={reload} />} />
-              <Action title="再読み込み" onAction={reload} />
+              <Action.Push title="Edit Keybinding" target={<Editor snapshot={snapshot} index={index} profile={profile} reload={reload} />} />
+              {addAction}
+              <Action title="Delete Keybinding" icon={Icon.Trash} style={Action.Style.Destructive} onAction={() => remove(index)} />
+              <Action title="Reload" onAction={reload} />
             </ActionPanel>} />;
         })}
       </List.Section>

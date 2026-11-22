@@ -20,8 +20,8 @@
   "preferences": [
     {
       "name": "configPath",
-      "title": "設定ファイルのパス",
-      "description": "空欄の場合は、Karabiner-Elements が通常使う設定ファイルを開きます",
+      "title": "Configuration File Path",
+      "description": "Leave blank to use the default Karabiner-Elements configuration file.",
       "type": "textfield",
       "required": false
     }

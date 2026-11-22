@@ -13,6 +13,7 @@ export const outputPhases = ["to", "to_after_key_up"] as const;
 export type Outputs = Partial<Record<(typeof outputPhases)[number], Output[]>>;
 
 type Mapping = {
+  type?: string;
   from: Input;
   description?: string;
   to?: Output[];
@@ -27,7 +28,7 @@ type Profile = Scope & {
   complex_modifications?: { rules?: { description: string; manipulators: Mapping[] }[] };
 };
 
-export type Binding = { profile: string; group: string; mapping: Mapping; complex: boolean };
+export type Binding = { profile: string; group: string; mapping: Mapping; complex: boolean; remove: () => void };
 export type Snapshot = ReturnType<typeof loadConfig>;
 
 export const keyTypes = ["key_code", "consumer_key_code", "pointing_button", "apple_vendor_top_case_key_code", "apple_vendor_keyboard_key_code"];
@@ -64,20 +65,28 @@ export function loadConfig(path: string) {
   const target = realpathSync(path);
   const raw = readFileSync(target, "utf8");
   const config = JSON.parse(raw) as { profiles?: Profile[] };
-  if (!Array.isArray(config.profiles)) throw new Error("Karabiner のプロファイルが見つかりません。");
+  if (!Array.isArray(config.profiles)) throw new Error("No Karabiner profiles found.");
 
   const bindings: Binding[] = [];
   for (const profile of config.profiles) {
-    const add = (group: string, mappings: Mapping[] = [], complex = false) => {
-      for (const mapping of mappings) bindings.push({ profile: profile.name, group, mapping, complex });
+    const add = (group: string, mappings: Mapping[] = [], removeEmptyRule?: () => void) => {
+      for (const mapping of mappings) {
+        bindings.push({ profile: profile.name, group, mapping, complex: !!removeEmptyRule, remove: () => {
+          mappings.splice(mappings.indexOf(mapping), 1);
+          if (!mappings.length) removeEmptyRule?.();
+        } });
+      }
     };
-    for (const rule of profile.complex_modifications?.rules ?? []) add(rule.description, rule.manipulators, true);
-    add("単純な割り当て", profile.simple_modifications);
-    add("ファンクションキー", profile.fn_function_keys);
+    const rules = profile.complex_modifications?.rules ?? [];
+    for (const rule of rules) {
+      add(rule.description, rule.manipulators, () => rules.splice(rules.indexOf(rule), 1));
+    }
+    add("Simple Modifications", profile.simple_modifications);
+    add("Function Keys", profile.fn_function_keys);
     for (const device of profile.devices ?? []) {
       const label = [device.identifiers?.vendor_id, device.identifiers?.product_id].join("/");
-      add("デバイス " + label + " の割り当て", device.simple_modifications);
-      add("デバイス " + label + " のファンクションキー", device.fn_function_keys);
+      add("Device " + label + " Simple Modifications", device.simple_modifications);
+      add("Device " + label + " Function Keys", device.fn_function_keys);
     }
   }
   return { path, target, raw, config, bindings, activeProfile: config.profiles.find((p) => p.selected)?.name };
@@ -94,25 +103,25 @@ export function keyLabel(code: string) {
 
 export function shortcut(input: Input) {
   const key = keyOf(input);
-  return [...(input.modifiers?.mandatory ?? []), key ? keyLabel(key.code) : "特殊入力"].join(" + ");
+  return [...(input.modifiers?.mandatory ?? []), key ? keyLabel(key.code) : "Special Input"].join(" + ");
 }
 
 function outputLabel(output: Output) {
   const application = output.software_function?.open_application;
-  if (application) return (application.file_path?.split("/").pop()?.replace(/\.app$/, "") || application.bundle_identifier || "アプリを開く");
+  if (application) return (application.file_path?.split("/").pop()?.replace(/\.app$/, "") || application.bundle_identifier || "Open Application");
   const command = output.shell_command;
   if (command) {
     const space = command.match(/yabai -m window --space (\d+)/);
-    if (space) return "ウィンドウを Space " + space[1] + " に移動";
+    if (space) return "Move Window to Space " + space[1];
     const audio = command.match(/SwitchAudioSource -t (input|output) -s "([^"]+)"/);
-    if (audio) return (audio[1] === "input" ? "入力" : "出力") + "を " + audio[2] + " に切り替え";
-    if (command.includes("pmset sleepnow")) return "Mac をスリープ";
+    if (audio) return "Switch Audio " + (audio[1] === "input" ? "Input" : "Output") + " to " + audio[2];
+    if (command.includes("pmset sleepnow")) return "Sleep Mac";
     const rectangle = command.match(/rectangle-pro:\/\/execute-action\?name=([\w-]+)/);
     if (rectangle) return "Rectangle Pro · " + rectangle[1].replaceAll("-", " ");
     const app = command.match(/tell application "(?!System Events")([^"]+)"/)?.[1]
       ?? command.match(/count windows of process "([^"]+)"/)?.[1];
-    if (app && command.includes("Move Tab to New Window")) return app + " のタブを新しいウィンドウへ";
-    if (app && /new window|workspace:new-window/.test(command)) return app + " の新しいウィンドウを開く";
+    if (app && command.includes("Move Tab to New Window")) return "Move " + app + " Tab to New Window";
+    if (app && /new window|workspace:new-window/.test(command)) return "Open New " + app + " Window";
     return command;
   }
   const key = keyOf(output);
@@ -121,39 +130,21 @@ function outputLabel(output: Output) {
 }
 
 export function actionLabel(mapping: Mapping) {
-  return mapping.description || [...(mapping.to ?? []), ...(mapping.to_after_key_up ?? [])].map(outputLabel).join(" → ") || "出力なし";
+  return mapping.description || [...(mapping.to ?? []), ...(mapping.to_after_key_up ?? [])].map(outputLabel).join(" → ") || "No Output";
 }
 
-function saveShortcut(snapshot: Snapshot, index: number, type: string, code: string, mandatory: string[], outputs: Outputs = {}) {
+function updateConfig(snapshot: Snapshot, update: (current: Snapshot) => void) {
   const current = loadConfig(snapshot.path);
   const ensureUnchanged = () => {
     if (realpathSync(snapshot.path) !== snapshot.target || readFileSync(snapshot.target, "utf8") !== snapshot.raw) {
-      throw new Error("設定ファイルが更新されています。一覧を再読み込みしてください。");
+      throw new Error("The configuration has changed. Reload the list and try again.");
     }
   };
   ensureUnchanged();
-  const binding = current.bindings[index];
-  const old = keyOf(binding.mapping.from);
-  if (!old || !keyTypes.includes(type) || !code) throw new Error("入力キーを選んでください。");
-  const from = { ...binding.mapping.from };
-  delete from[old.type];
-  from[type] = code;
-  if (binding.complex && (mandatory.length || from.modifiers)) {
-    from.modifiers = { ...from.modifiers, mandatory };
-    if (!mandatory.length) delete from.modifiers.mandatory;
-  }
-  binding.mapping.from = from;
-  for (const phase of outputPhases) {
-    if (outputs[phase]) binding.mapping[phase] = outputs[phase];
-  }
+  update(current);
   const temporary = snapshot.target + "." + randomUUID() + ".tmp";
   const mode = statSync(snapshot.target).mode & 0o777;
   writeFileSync(temporary, JSON.stringify(current.config, null, 4) + "\n", { mode, flag: "wx" });
-  return { temporary, ensureUnchanged };
-}
-
-export function commitShortcut(snapshot: Snapshot, index: number, type: string, code: string, mandatory: string[], outputs: Outputs = {}) {
-  const { temporary, ensureUnchanged } = saveShortcut(snapshot, index, type, code, mandatory, outputs);
   try {
     ensureUnchanged();
     copyFileSync(snapshot.target, snapshot.target + ".raycast-backup", constants.COPYFILE_FICLONE);
@@ -162,4 +153,43 @@ export function commitShortcut(snapshot: Snapshot, index: number, type: string, 
   } finally {
     rmSync(temporary, { force: true });
   }
+}
+
+export function commitShortcut(snapshot: Snapshot, index: number, type: string, code: string, mandatory: string[], outputs: Outputs = {}) {
+  updateConfig(snapshot, (current) => {
+    const binding = current.bindings[index];
+    const old = keyOf(binding.mapping.from);
+    if (!old || !keyTypes.includes(type) || !code) throw new Error("Select an input key.");
+    const from = { ...binding.mapping.from };
+    delete from[old.type];
+    from[type] = code;
+    if (binding.complex && (mandatory.length || from.modifiers)) {
+      from.modifiers = { ...from.modifiers, mandatory };
+      if (!mandatory.length) delete from.modifiers.mandatory;
+    }
+    binding.mapping.from = from;
+    for (const phase of outputPhases) {
+      if (outputs[phase]) binding.mapping[phase] = outputs[phase];
+    }
+  });
+}
+
+export function addBinding(snapshot: Snapshot, profileName: string, description: string, type: string, code: string, mandatory: string[], outputs: Outputs) {
+  updateConfig(snapshot, ({ config }) => {
+    const profile = config.profiles?.find(({ name }) => name === profileName);
+    if (!profile) throw new Error("Select a profile.");
+    if (!description.trim()) throw new Error("Enter a name for the keybinding.");
+    const from: Input = { [type]: code };
+    if (mandatory.length) from.modifiers = { mandatory };
+    const complex = profile.complex_modifications ??= {};
+    const rules = complex.rules ??= [];
+    rules.push({
+      description: description.trim(),
+      manipulators: [{ type: "basic", from, ...outputs }],
+    });
+  });
+}
+
+export function deleteBinding(snapshot: Snapshot, index: number) {
+  updateConfig(snapshot, ({ bindings }) => bindings[index].remove());
 }
