@@ -1,8 +1,29 @@
 import { Action, ActionPanel, Alert, confirmAlert, Form, Icon, List, Toast, getPreferenceValues, showToast, useNavigation } from "@raycast/api";
+import { execFile } from "node:child_process";
+import { userInfo } from "node:os";
+import { promisify } from "node:util";
 import { useEffect, useState } from "react";
 import { addBinding, deleteBinding, actionLabel, commitShortcut, configPath, keyLabel, keyOf, keys, keyTypes, loadConfig, modifiers, shortcut, outputPhases, type Binding, type Output, type Outputs, type Snapshot } from "./config";
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+const execFileAsync = promisify(execFile);
+
+async function restartKarabinerAfterSave(title: string) {
+  try {
+    // Karabiner may miss changes when karabiner.json points outside its watched directory.
+    await execFileAsync("/bin/launchctl", [
+      "kickstart", "-k", `gui/${userInfo().uid}/org.pqrs.service.agent.Karabiner-Console-User-Server`,
+    ]);
+  } catch (error) {
+    await showToast({
+      style: Toast.Style.Failure,
+      title: title + ", but Karabiner Could Not Restart",
+      message: message(error),
+    });
+    return;
+  }
+  await showToast({ style: Toast.Style.Success, title });
+}
 
 const actionTypes = [
   { value: "key", title: "Send Keystroke" },
@@ -117,7 +138,7 @@ function Editor({ snapshot, index, profile, reload }: { snapshot: Snapshot; inde
       else commitShortcut(snapshot, index, selected.type, selected.code, values.mandatory ?? [], outputs);
       reload();
       pop();
-      await showToast({ style: Toast.Style.Success, title: "Keybinding Saved" });
+      await restartKarabinerAfterSave("Keybinding Saved");
     } catch (error) {
       await showToast({ style: Toast.Style.Failure, title: "Could Not Save Keybinding", message: message(error) });
     } finally {
@@ -192,7 +213,7 @@ export default function Command() {
     try {
       deleteBinding(snapshot, index);
       reload();
-      await showToast({ style: Toast.Style.Success, title: "Keybinding Deleted" });
+      await restartKarabinerAfterSave("Keybinding Deleted");
     } catch (error) {
       await showToast({ style: Toast.Style.Failure, title: "Could Not Delete Keybinding", message: message(error) });
     }
