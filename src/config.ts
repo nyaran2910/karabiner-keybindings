@@ -4,11 +4,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 type Input = Record<string, unknown> & { modifiers?: { mandatory?: string[]; optional?: string[] } };
-type Output = Record<string, unknown> & {
+export type Output = Record<string, unknown> & {
   modifiers?: string[];
   shell_command?: string;
   software_function?: { open_application?: { file_path?: string; bundle_identifier?: string } };
 };
+export const outputPhases = ["to", "to_after_key_up"] as const;
+export type Outputs = Partial<Record<(typeof outputPhases)[number], Output[]>>;
+
 type Mapping = {
   from: Input;
   description?: string;
@@ -121,7 +124,7 @@ export function actionLabel(mapping: Mapping) {
   return mapping.description || [...(mapping.to ?? []), ...(mapping.to_after_key_up ?? [])].map(outputLabel).join(" → ") || "出力なし";
 }
 
-function saveShortcut(snapshot: Snapshot, index: number, type: string, code: string, mandatory: string[]) {
+function saveShortcut(snapshot: Snapshot, index: number, type: string, code: string, mandatory: string[], outputs: Outputs = {}) {
   const current = loadConfig(snapshot.path);
   const ensureUnchanged = () => {
     if (realpathSync(snapshot.path) !== snapshot.target || readFileSync(snapshot.target, "utf8") !== snapshot.raw) {
@@ -140,14 +143,17 @@ function saveShortcut(snapshot: Snapshot, index: number, type: string, code: str
     if (!mandatory.length) delete from.modifiers.mandatory;
   }
   binding.mapping.from = from;
+  for (const phase of outputPhases) {
+    if (outputs[phase]) binding.mapping[phase] = outputs[phase];
+  }
   const temporary = snapshot.target + "." + randomUUID() + ".tmp";
   const mode = statSync(snapshot.target).mode & 0o777;
   writeFileSync(temporary, JSON.stringify(current.config, null, 4) + "\n", { mode, flag: "wx" });
   return { temporary, ensureUnchanged };
 }
 
-export function commitShortcut(snapshot: Snapshot, index: number, type: string, code: string, mandatory: string[]) {
-  const { temporary, ensureUnchanged } = saveShortcut(snapshot, index, type, code, mandatory);
+export function commitShortcut(snapshot: Snapshot, index: number, type: string, code: string, mandatory: string[], outputs: Outputs = {}) {
+  const { temporary, ensureUnchanged } = saveShortcut(snapshot, index, type, code, mandatory, outputs);
   try {
     ensureUnchanged();
     copyFileSync(snapshot.target, snapshot.target + ".raycast-backup", constants.COPYFILE_FICLONE);

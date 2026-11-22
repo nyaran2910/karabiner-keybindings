@@ -1,8 +1,91 @@
 import { Action, ActionPanel, Form, Icon, List, Toast, getPreferenceValues, showToast, useNavigation } from "@raycast/api";
 import { useEffect, useState } from "react";
-import { actionLabel, commitShortcut, configPath, keyLabel, keyOf, keys, keyTypes, loadConfig, modifiers, shortcut, type Snapshot } from "./config";
+import { actionLabel, commitShortcut, configPath, keyLabel, keyOf, keys, keyTypes, loadConfig, modifiers, shortcut, outputPhases, type Output, type Outputs, type Snapshot } from "./config";
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+const actionTypes = [
+  { value: "key", title: "キー入力" },
+  { value: "shell", title: "シェルコマンド" },
+  { value: "app", title: "アプリを開く" },
+];
+
+function outputType(output: Output) {
+  if (typeof output.shell_command === "string") return "shell";
+  if (output.software_function?.open_application) return "app";
+  if (keyOf(output)) return "key";
+  return "other";
+}
+
+function OutputFields({ id, output, complex, label }: { id: string; output: Output; complex: boolean; label: string }) {
+  const originalType = outputType(output);
+  const [type, setType] = useState(originalType);
+  if (originalType === "other") return <Form.Description text={actionLabel({ from: {}, to: [output] })} />;
+  const key = keyOf(output);
+  const app = output.software_function?.open_application;
+  return <>
+    <Form.Separator />
+    <Form.Description text={label} />
+    <Form.Dropdown id={id + "-type"} title="動作の種類" value={type} onChange={setType}>
+      {actionTypes.filter(({ value }) => complex || value === "key").map(({ value, title }) =>
+        <Form.Dropdown.Item key={value} value={value} title={title} />)}
+    </Form.Dropdown>
+    {type === "shell" && <Form.TextArea id={id + "-command"} title="シェルコマンド"
+      defaultValue={output.shell_command ?? ""} placeholder="/usr/bin/open -a Finder" />}
+    {type === "app" && <>
+      <Form.TextField id={id + "-app-path"} title="アプリのパス" defaultValue={app?.file_path ?? ""}
+        placeholder="/Applications/Example.app" />
+      <Form.TextField id={id + "-bundle"} title="バンドル ID" defaultValue={app?.bundle_identifier ?? ""}
+        placeholder="パスかバンドル ID を入力" />
+    </>}
+    {type === "key" && <>
+      <Form.Dropdown id={id + "-key"} title="出力キー" defaultValue={key ? key.type + ":" + key.code : "key_code:a"}>
+        {keyTypes.map((keyType) => {
+          const codes = new Set(keys[keyType as keyof typeof keys]);
+          if (key?.type === keyType) codes.add(key.code);
+          return codes.size > 0 && <Form.Dropdown.Section key={keyType} title={keyLabel(keyType)}>
+            {[...codes].map((code) => <Form.Dropdown.Item key={code} value={keyType + ":" + code} title={keyLabel(code)} />)}
+          </Form.Dropdown.Section>;
+        })}
+      </Form.Dropdown>
+      {complex && <Form.TagPicker id={id + "-mods"} title="出力の修飾キー" defaultValue={output.modifiers ?? []}>
+        {[...new Set([...modifiers, ...(output.modifiers ?? [])])].map((name) =>
+          <Form.TagPicker.Item key={name} value={name} title={keyLabel(name)} />)}
+      </Form.TagPicker>}
+    </>}
+  </>;
+}
+
+type FormValues = { key: string; mandatory?: string[] } & Record<string, string | string[] | undefined>;
+
+function readOutput(values: FormValues, id: string, original: Output): Output {
+  const kind = values[id + "-type"];
+  if (!kind) return original;
+  const result: Output = kind === outputType(original) ? { ...original } : {};
+  if (kind === "shell") {
+    const command = String(values[id + "-command"] ?? "");
+    if (!command.trim()) throw new Error("シェルコマンドを入力してください。");
+    result.shell_command = command;
+  } else if (kind === "app") {
+    const filePath = String(values[id + "-app-path"] ?? "").trim();
+    const bundle = String(values[id + "-bundle"] ?? "").trim();
+    if (!filePath && !bundle) throw new Error("アプリのパスかバンドル ID を入力してください。");
+    result.software_function = { ...result.software_function, open_application: {
+      ...(filePath ? { file_path: filePath } : {}),
+      ...(bundle ? { bundle_identifier: bundle } : {}),
+    } };
+  } else {
+    const [type, code] = String(values[id + "-key"] ?? "").split(":");
+    if (!keyTypes.includes(type) || !code) throw new Error("出力キーを選んでください。");
+    const previous = keyOf(result);
+    if (previous) delete result[previous.type];
+    result[type] = code;
+    const mods = values[id + "-mods"];
+    if (Array.isArray(mods) && mods.length) result.modifiers = mods;
+    else delete result.modifiers;
+  }
+  return result;
+}
 
 function Editor({ snapshot, index, reload }: { snapshot: Snapshot; index: number; reload: () => void }) {
   const { pop } = useNavigation();
@@ -17,12 +100,17 @@ function Editor({ snapshot, index, reload }: { snapshot: Snapshot; index: number
     }));
   }).filter(({ type }) => binding.complex || type === original?.type);
 
-  async function submit(values: { key: string; mandatory?: string[] }) {
+  async function submit(values: FormValues) {
     const selected = options.find(({ value }) => value === values.key);
     if (!selected || saving) return;
     setSaving(true);
     try {
-      commitShortcut(snapshot, index, selected.type, selected.code, values.mandatory ?? []);
+      const outputs: Outputs = {};
+      for (const phase of outputPhases) {
+        const sequence = binding.mapping[phase];
+        if (sequence) outputs[phase] = sequence.map((output, step) => readOutput(values, phase + step, output));
+      }
+      commitShortcut(snapshot, index, selected.type, selected.code, values.mandatory ?? [], outputs);
       reload();
       pop();
       await showToast({ style: Toast.Style.Success, title: "キー割り当てを保存しました" });
@@ -56,6 +144,11 @@ function Editor({ snapshot, index, reload }: { snapshot: Snapshot; index: number
       {[...new Set([...modifiers, ...mandatory])].map((name) =>
         <Form.TagPicker.Item key={name} value={name} title={keyLabel(name)} />)}
     </Form.TagPicker>}
+    {outputPhases.flatMap((phase) => (binding.mapping[phase] ?? []).map((output, step) => {
+      const id = phase + step;
+      const timing = phase === "to" ? "キーを押したとき" : "キーを離したとき";
+      return <OutputFields key={id} id={id} output={output} complex={binding.complex} label={timing + " · 動作 " + (step + 1)} />;
+    }))}
   </Form>;
 }
 
