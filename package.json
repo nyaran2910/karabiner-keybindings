@@ -1,0 +1,42 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "karabiner-keybindings",
+  "title": "Karabiner Keybindings",
+  "description": "Browse and edit existing Karabiner-Elements shortcuts",
+  "icon": "extension-icon.png",
+  "author": "nyaran2910",
+  "categories": [
+    "Productivity"
+  ],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "index",
+      "title": "Edit Karabiner Keybindings",
+      "description": "Find a Karabiner action and change its shortcut",
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "configPath",
+      "title": "設定ファイルのパス",
+      "description": "空欄の場合は、Karabiner-Elements が通常使う設定ファイルを開きます",
+      "type": "textfield",
+      "required": false
+    }
+  ],
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@raycast/api": "^2.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/react": "19.3.0",
+    "typescript": "^5.7.2"
+  }
+}
